@@ -1,5 +1,6 @@
 #!/usr/bin/env escript
 %%! -noshell
+-include_lib("public_key/include/public_key.hrl").
 %% What `-proto_dist inet_tls` protects in Erlang distribution, and what it does
 %% not. Native only: certificates from public_key:pkix_test_data/1 (no openssl),
 %% peer nodes from the OTP `peer` module (a port owned by this VM, no shell),
@@ -29,6 +30,17 @@ main(_) ->
     CKey  = pem(Dir, "c-key.pem",  [key(peer_key(client_config, Good))]),
     RCert = pem(Dir, "r-cert.pem", [cert(peer_cert(client_config, Rogue))]),
     RKey  = pem(Dir, "r-key.pem",  [key(peer_key(client_config, Rogue))]),
+    %% column D: the same server, plus net_kernel:allow/1. allowed_nodes/2 matches the
+    %% client certificate's subjectAltName against the peer IP ({ip,_}) and the hosts of
+    %% the allowed nodes ({dns_id,_}); the default test client cert has NO SAN. Two more
+    %% client roots, each issuing one cert with a SAN, are added to the server's CA file.
+    SanIp  = chain([#'Extension'{extnID = ?'id-ce-subjectAltName', extnValue = [{iPAddress, [127,0,0,1]}], critical = false}]),
+    SanDns = chain([#'Extension'{extnID = ?'id-ce-subjectAltName', extnValue = [{dNSName, "127.0.0.1"}], critical = false}]),
+    CAAll  = pem(Dir, "ca-all.pem", [cert(C) || C <- cacerts(Good) ++ cacerts(SanIp) ++ cacerts(SanDns)]),
+    ICert  = pem(Dir, "i-cert.pem", [cert(peer_cert(client_config, SanIp))]),
+    IKey   = pem(Dir, "i-key.pem",  [key(peer_key(client_config, SanIp))]),
+    DCert  = pem(Dir, "d-cert.pem", [cert(peer_cert(client_config, SanDns))]),
+    DKey   = pem(Dir, "d-key.pem",  [key(peer_key(client_config, SanDns))]),
     Server = [{certfile, SCert}, {keyfile, SKey}, {cacertfile, CA},
               {verify, verify_peer}, {fail_if_no_peer_cert, true}],
     ServerNoVerify = [{certfile, SCert}, {keyfile, SKey}, {cacertfile, CA}, {verify, verify_none}],
@@ -37,6 +49,18 @@ main(_) ->
     OptNoCert = optfile(Dir, "nocert.conf",   Server,         [{cacertfile, CA}, {verify, verify_none}]),
     OptRogue  = optfile(Dir, "rogue.conf",    Server,         Client(RCert, RKey)),
     OptLax    = optfile(Dir, "noverify.conf", ServerNoVerify, [{cacertfile, CA}, {verify, verify_none}]),
+    ServerAll = [{certfile, SCert}, {keyfile, SKey}, {cacertfile, CAAll},
+                 {verify, verify_peer}, {fail_if_no_peer_cert, true}],
+    %% the server default is fail_if_no_peer_cert = true once verify_peer is set (ssl_config.erl),
+    %% so "client certificate optional" has to be said explicitly
+    ServerAllOptional = [{certfile, SCert}, {keyfile, SKey}, {cacertfile, CAAll},
+                        {verify, verify_peer}, {fail_if_no_peer_cert, false}],
+    ServerLaxAll = [{certfile, SCert}, {keyfile, SKey}, {cacertfile, CAAll}, {verify, verify_none}],
+    OptAllow    = optfile(Dir, "allow.conf",     ServerAll,         Client(CCert, CKey)),
+    OptAllowOpt = optfile(Dir, "allow-opt.conf", ServerAllOptional, Client(CCert, CKey)),
+    OptLaxAll   = optfile(Dir, "allow-lax.conf", ServerLaxAll,      [{cacertfile, CA}, {verify, verify_none}]),
+    OptSanIp    = optfile(Dir, "san-ip.conf",    Server,            Client(ICert, IKey)),
+    OptSanDns   = optfile(Dir, "san-dns.conf",   Server,            Client(DCert, DKey)),
     Tls = fun(Opt) -> ["-proto_dist", "inet_tls", "-ssl_dist_optfile", Opt] end,
 
     io:format("## A. baseline, plain inet_tcp distribution (cookie is the only check)~n"),
@@ -65,6 +89,12 @@ main(_) ->
     try_connect("cookie ok + client cert, loopback peer",     c6, GoodC, Tls(OptGood),   BN),
     stop(BP),
 
+    io:format("~n## B3. inet_tls + inet_dist_listen_options [{ip,{127,0,0,1}}]~n"),
+    {B3P, B3N} = start(tlsbound2, GoodC, Tls(OptGood) ++ ["-kernel", "inet_dist_listen_options", "[{ip,{127,0,0,1}}]"]),
+    io:format("  listener of ~s: ~s   (the ip option of inet_dist_listen_options binds it as well)~n", [B3N, listeners(B3P)]),
+    try_connect("cookie ok + client cert, loopback peer",     c7, GoodC, Tls(OptGood),   B3N),
+    stop(B3P),
+
     io:format("~n## C. inet_tls with verify_none on the server (a common misconfiguration)~n"),
     {LP, LN} = start(tlslax, GoodC, Tls(OptLax)),
     io:format("  listener of ~s: ~s~n", [LN, listeners(LP)]),
@@ -72,12 +102,54 @@ main(_) ->
     try_connect("WRONG cookie + NO client cert", l2, BadC, Tls(OptNoCert), LN),
     stop(LP),
 
+    io:format("~n## D. inet_tls, verify_peer + fail_if_no_peer_cert, plus net_kernel:allow/1 on the server~n"),
+    io:format("   (allowed_nodes/2 in inet_tls_dist runs on every accepted TLS connection)~n"),
+    {NP, NN} = start(tlsnoallow, GoodC, Tls(OptAllow)),
+    io:format("  allow list of ~s: ~p (control node)~n", [NN, peer:call(NP, net_kernel, allowed, [])]),
+    try_connect("control: cluster cert WITHOUT SAN, allow list EMPTY", d0, GoodC, Tls(OptGood),  NN),
+    try_connect("control: cert SAN iPAddress, allow list EMPTY",      d0b, GoodC, Tls(OptSanIp), NN),
+    stop(NP),
+    {AP, AN} = start(tlsallow, GoodC, Tls(OptAllow)),
+    ok = peer:call(AP, net_kernel, allow, [['d1@127.0.0.1', 'd2@127.0.0.1', 'd3@127.0.0.1']]),
+    io:format("  allow list of ~s: ~p~n", [AN, peer:call(AP, net_kernel, allowed, [])]),
+    try_connect("node IN list, cert SAN iPAddress 127.0.0.1",  d1, GoodC, Tls(OptSanIp),  AN),
+    try_connect("node IN list, cert SAN dNSName 127.0.0.1",    d2, GoodC, Tls(OptSanDns), AN),
+    try_connect("node IN list, cluster cert WITHOUT SAN",      d3, GoodC, Tls(OptGood),   AN),
+    try_connect("node NOT in list, cert SAN iPAddress",        d4, GoodC, Tls(OptSanIp),  AN),
+    try_connect("node NOT in list, cert SAN dNSName 127.0.0.1", d8, GoodC, Tls(OptSanDns), AN),
+    try_connect("node NOT in list, cluster cert WITHOUT SAN",  d5, GoodC, Tls(OptGood),   AN),
+    stop(AP),
+    io:format("~n## D2. same server and list, but {fail_if_no_peer_cert, false} (client certificate optional)~n"),
+    {OP, ON} = start(tlsallowopt, GoodC, Tls(OptAllowOpt)),
+    ok = peer:call(OP, net_kernel, allow, [['d1@127.0.0.1', 'd2@127.0.0.1', 'd3@127.0.0.1']]),
+    io:format("  allow list of ~s: ~p~n", [ON, peer:call(OP, net_kernel, allowed, [])]),
+    %% the refused attempt goes first: dist_util reports it after answering the peer, and
+    %% the report only reaches the output if the accepting node lives a little longer
+    try_connect("node NOT in list, NO client cert",            d7, GoodC, Tls(OptNoCert), ON),
+    try_connect("node IN list, NO client cert",                d1, GoodC, Tls(OptNoCert), ON),
+    stop(OP),
+
+    io:format("~n## E. inet_tls with verify_none on the server, plus net_kernel:allow/1~n"),
+    io:format("   (no certificate to match: the list can only filter the name the peer declares)~n"),
+    {EP, EN} = start(tlslaxallow, GoodC, Tls(OptLaxAll)),
+    ok = peer:call(EP, net_kernel, allow, [['d1@127.0.0.1', 'd2@127.0.0.1', 'd3@127.0.0.1']]),
+    io:format("  allow list of ~s: ~p~n", [EN, peer:call(EP, net_kernel, allowed, [])]),
+    try_connect("node NOT in list, NO client cert",            e2, GoodC, Tls(OptNoCert), EN),
+    try_connect("node IN list, NO client cert",                d2, GoodC, Tls(OptNoCert), EN),
+    stop(EP),
+
     ok = file:del_dir_r(Dir),
     io:format("~n=> inet_tls with verify_peer + fail_if_no_peer_cert makes the client certificate the~n"
               "   authentication: no cert, or a cert from another CA, is refused during the TLS~n"
               "   handshake, before the cookie is ever checked. The cookie is still checked after~n"
-              "   TLS (wrong cookie + valid cert is refused), so both are required. Any certificate~n"
-              "   from the trusted roots is accepted: the certificate is not tied to the node name.~n"
+              "   TLS (wrong cookie + valid cert is refused), so both are required. Without an allow~n"
+              "   list any certificate from the trusted roots is accepted: the certificate is not tied~n"
+              "   to the node name (B). With net_kernel:allow/1 the server reduces the list to its hosts~n"
+              "   and matches the certificate against them and against the peer address (D): a~n"
+              "   certificate issued to an allowed host, or to the peer address, admits ANY node name on~n"
+              "   that host or address, in the list or not; a certificate that names neither is refused~n"
+              "   even for a node in the list. Without a certificate (D2, E) the list only filters the~n"
+              "   name the peer declares.~n"
               "=> With verify_none the cookie is again the only check: TLS then gives confidentiality~n"
               "   on the wire, not authentication of the peer.~n"
               "=> TLS does not change where the node listens: the listener stays on 0.0.0.0. Binding~n"
@@ -91,10 +163,11 @@ main(_) ->
 cookie() -> binary_to_list(binary:encode_hex(crypto:strong_rand_bytes(16))).
 
 %% two self-signed roots (server root, client root), one server cert, one client cert, in memory
-chain() ->
+chain() -> chain([]).
+chain(ClientPeerExts) ->
     K = [{key, {rsa, 2048, 17}}],
     public_key:pkix_test_data(#{server_chain => #{root => K, intermediates => [], peer => K},
-                                client_chain => #{root => K, intermediates => [], peer => K}}).
+                                client_chain => #{root => K, intermediates => [], peer => K ++ [{extensions, ClientPeerExts}]}}).
 cacerts(Chain)          -> proplists:get_value(cacerts, maps:get(client_config, Chain)).
 peer_cert(Side, Chain)  -> proplists:get_value(cert, maps:get(Side, Chain)).
 peer_key(Side, Chain)   -> proplists:get_value(key, maps:get(Side, Chain)).
@@ -119,10 +192,11 @@ try_connect(Label, Name, Cookie, Extra, Target) ->
     R = peer:call(P, net_kernel, connect_node, [Target]),
     io:format("  ~-46s -> ~p~n", [Label, R]),
     stop(P).
-%% the rejection report is logged by the accepting node asynchronously: flush its
-%% logger before the node is stopped, or the last report is lost
+%% a rejection report is logged by the accepting node asynchronously, after it has
+%% answered the peer: flush the logger before a node is stopped, and never make a
+%% refused attempt the last action against an accepting node
 stop(P) ->
-    _ = (catch peer:call(P, logger_std_h, filesync, [default])),
+    _ = try peer:call(P, logger_std_h, filesync, [default]) catch _:_ -> ok end,
     peer:stop(P).
 %% evaluate inside the peer (an escript fun cannot be sent to another node)
 listeners(P) ->

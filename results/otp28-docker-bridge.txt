@@ -2,54 +2,106 @@ environment
   OTP 28 erts-16.4.0.6
 
 ## A. baseline, plain inet_tcp distribution (cookie is the only check)
-  listener of plain@127.0.0.1: 0.0.0.0:45931
+  listener of plain@127.0.0.1: 0.0.0.0:39627
   cookie ok, plain peer                          -> true
   WRONG cookie, plain peer                       -> false
-=ERROR REPORT==== 10-Sep-2026::02:45:37.281282 ===
+=ERROR REPORT==== 22-Sep-2026::19:08:30.672094 ===
 ** Connection attempt from node 'pl2@127.0.0.1' rejected. Invalid challenge reply. **
 
 
 ## B. inet_tls distribution, server requires a client certificate
-  listener of tlssrv@127.0.0.1: 0.0.0.0:39277   (TLS does not move the bind off 0.0.0.0)
+  listener of tlssrv@127.0.0.1: 0.0.0.0:40877   (TLS does not move the bind off 0.0.0.0)
   TLS versions enabled by default in this OTP: ['tlsv1.3','tlsv1.2']
   cookie ok + client cert from the cluster CA    -> true
-=NOTICE REPORT==== 10-Sep-2026::02:45:37.918989 ===
+=NOTICE REPORT==== 22-Sep-2026::19:08:31.306061 ===
 TLS server: In state wait_cert at tls_handshake_1_3.erl:455 generated SERVER ALERT: Fatal - Certificate Required
  - certificate_required
   cookie ok + NO client cert                     -> false
-=NOTICE REPORT==== 10-Sep-2026::02:45:38.143761 ===
+=NOTICE REPORT==== 22-Sep-2026::19:08:31.579618 ===
 TLS server: In state wait_cert at ssl_handshake.erl:2218 generated SERVER ALERT: Fatal - Unknown CA
 
   cookie ok + client cert from a ROGUE CA        -> false
-=NOTICE REPORT==== 10-Sep-2026::02:45:38.149639 ===
+=NOTICE REPORT==== 22-Sep-2026::19:08:31.582967 ===
 TLS client: In state connection received SERVER ALERT: Fatal - Unknown CA
 
-=ERROR REPORT==== 10-Sep-2026::02:45:38.402186 ===
+=ERROR REPORT==== 22-Sep-2026::19:08:31.818745 ===
 ** Connection attempt from node 'c4@127.0.0.1' rejected. Invalid challenge reply. **
 
   WRONG cookie + valid client cert               -> false
   cookie ok, plain inet_tcp peer (no TLS)        -> false
-=NOTICE REPORT==== 10-Sep-2026::02:45:38.523306 ===
+=NOTICE REPORT==== 22-Sep-2026::19:08:32.047366 ===
 TLS server: In state hello at tls_record.erl:524 generated SERVER ALERT: Fatal - Unexpected Message
  - {unsupported_record_type,0}
 
 ## B2. inet_tls + inet_dist_use_interface {127,0,0,1}
-  listener of tlsbound@127.0.0.1: 127.0.0.1:46427   (the parameter applies to inet_tls unchanged)
+  listener of tlsbound@127.0.0.1: 127.0.0.1:39309   (the parameter applies to inet_tls unchanged)
+  cookie ok + client cert, loopback peer         -> true
+
+## B3. inet_tls + inet_dist_listen_options [{ip,{127,0,0,1}}]
+  listener of tlsbound2@127.0.0.1: 127.0.0.1:38741   (the ip option of inet_dist_listen_options binds it as well)
   cookie ok + client cert, loopback peer         -> true
 
 ## C. inet_tls with verify_none on the server (a common misconfiguration)
-  listener of tlslax@127.0.0.1: 0.0.0.0:37867
+  listener of tlslax@127.0.0.1: 0.0.0.0:41125
   cookie ok + NO client cert                     -> true
-  WRONG cookie + NO client cert                  -> false
-=ERROR REPORT==== 10-Sep-2026::02:45:39.674722 ===
+=ERROR REPORT==== 22-Sep-2026::19:08:33.670428 ===
 ** Connection attempt from node 'l2@127.0.0.1' rejected. Invalid challenge reply. **
 
+  WRONG cookie + NO client cert                  -> false
+
+## D. inet_tls, verify_peer + fail_if_no_peer_cert, plus net_kernel:allow/1 on the server
+   (allowed_nodes/2 in inet_tls_dist runs on every accepted TLS connection)
+  allow list of tlsnoallow@127.0.0.1: {ok,[]} (control node)
+  control: cluster cert WITHOUT SAN, allow list  -> true
+  control: cert SAN iPAddress, allow list EMPTY  -> true
+  allow list of tlsallow@127.0.0.1: {ok,
+                                     ['d1@127.0.0.1','d2@127.0.0.1',
+                                      'd3@127.0.0.1']}
+  node IN list, cert SAN iPAddress 127.0.0.1     -> true
+  node IN list, cert SAN dNSName 127.0.0.1       -> true
+  node IN list, cluster cert WITHOUT SAN         -> false
+=ERROR REPORT==== 22-Sep-2026::19:08:35.813623 ===
+** Connection attempt from disallowed node(s) {127,0,0,1} ** 
+
+  node NOT in list, cert SAN iPAddress           -> true
+  node NOT in list, cert SAN dNSName 127.0.0.1   -> true
+=ERROR REPORT==== 22-Sep-2026::19:08:36.863109 ===
+** Connection attempt from disallowed node(s) {127,0,0,1} ** 
+
+  node NOT in list, cluster cert WITHOUT SAN     -> false
+
+## D2. same server and list, but {fail_if_no_peer_cert, false} (client certificate optional)
+  allow list of tlsallowopt@127.0.0.1: {ok,
+                                        ['d1@127.0.0.1','d2@127.0.0.1',
+                                         'd3@127.0.0.1']}
+  node NOT in list, NO client cert               -> false
+=ERROR REPORT==== 22-Sep-2026::19:08:37.460564 ===
+** Connection attempt from disallowed node d7@127.0.0.1 ** 
+
+  node IN list, NO client cert                   -> true
+
+## E. inet_tls with verify_none on the server, plus net_kernel:allow/1
+   (no certificate to match: the list can only filter the name the peer declares)
+  allow list of tlslaxallow@127.0.0.1: {ok,
+                                        ['d1@127.0.0.1','d2@127.0.0.1',
+                                         'd3@127.0.0.1']}
+  node NOT in list, NO client cert               -> false
+=ERROR REPORT==== 22-Sep-2026::19:08:38.180894 ===
+** Connection attempt from disallowed node e2@127.0.0.1 ** 
+
+  node IN list, NO client cert                   -> true
 
 => inet_tls with verify_peer + fail_if_no_peer_cert makes the client certificate the
    authentication: no cert, or a cert from another CA, is refused during the TLS
    handshake, before the cookie is ever checked. The cookie is still checked after
-   TLS (wrong cookie + valid cert is refused), so both are required. Any certificate
-   from the trusted roots is accepted: the certificate is not tied to the node name.
+   TLS (wrong cookie + valid cert is refused), so both are required. Without an allow
+   list any certificate from the trusted roots is accepted: the certificate is not tied
+   to the node name (B). With net_kernel:allow/1 the server reduces the list to its hosts
+   and matches the certificate against them and against the peer address (D): a
+   certificate issued to an allowed host, or to the peer address, admits ANY node name on
+   that host or address, in the list or not; a certificate that names neither is refused
+   even for a node in the list. Without a certificate (D2, E) the list only filters the
+   name the peer declares.
 => With verify_none the cookie is again the only check: TLS then gives confidentiality
    on the wire, not authentication of the peer.
 => TLS does not change where the node listens: the listener stays on 0.0.0.0. Binding
