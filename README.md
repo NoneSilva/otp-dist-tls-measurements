@@ -8,11 +8,15 @@ wrong cookie, over TLS or plain TCP. A plain `inet_tcp` node and a TLS node with
 `verify_none` are the controls, and one more TLS node is bound to loopback with
 `inet_dist_use_interface` to show that the bind is a separate control.
 
+Measurements behind a documentation change proposed to Erlang/OTP,
+"ssl: document what the distribution TLS options do and do not check"
+(<https://github.com/erlang/otp/pull/11697>, target `maint`); its body cites
+the rows here it relies on.
+
 Companion to [otp-loopback-node-measurements](https://github.com/NoneSilva/otp-loopback-node-measurements)
 (where the node listens) and to the documentation change proposed in
-[erlang/otp#11617](https://github.com/erlang/otp/pull/11617). Together they
-separate the three controls people conflate: the cookie, the bind address, and
-TLS.
+<https://github.com/erlang/otp/pull/11617>. Together they separate the three
+controls people conflate: the cookie, the bind address, and TLS.
 
 ## Run it
 
@@ -142,7 +146,7 @@ directions.
 - TLS 1.3 post-handshake client authentication. OTP's `ssl` does not
   implement it (listed as not supported in
   `lib/ssl/doc/guides/standards_compliance.md`, RFC 8446 sections 4.2.6 and
-  4.6.2; tracked in [erlang/otp#9667](https://github.com/erlang/otp/issues/9667)),
+  4.6.2; tracked in <https://github.com/erlang/otp/issues/9667>),
   so a node cannot accept a connection first and ask for the certificate later.
 - A second physical host. The peers run in the same container; the listener's
   bind address is what determines reachability from elsewhere, and that is the
